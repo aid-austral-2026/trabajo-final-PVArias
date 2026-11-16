@@ -8,7 +8,7 @@ Trabajo final de **Análisis Inteligente de Datos** (Maestría en Explotación d
 
 **Autora:** Paula Arias
 
-**Informe publicado:** <https://aid-austral-2025.github.io/trabajo-final-PVArias/>
+**Informe publicado:** <https://aid-austral-2026.github.io/trabajo-final-PVArias/>
 
 ## Descripción
 
