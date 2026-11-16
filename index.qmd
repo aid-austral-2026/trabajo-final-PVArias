@@ -1,0 +1,415 @@
+---
+title: "Películas de IMDb: puntajes y duración por década y género"
+author: "Paula Arias"
+date: today
+lang: es
+format:
+  html:
+    embed-resources: true
+    toc: true
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r}
+#| label: setup
+# Paquetes necesarios (instalar una sola vez si no están disponibles):
+# install.packages(c("tidyverse", "knitr", "plotly", "crosstalk"))
+library(tidyverse)
+library(knitr)
+library(plotly)
+library(crosstalk)
+
+theme_set(theme_bw())   # estilo único para todos los gráficos
+
+peliculas <- read_csv("datos_salida/peliculas.csv", show_col_types = FALSE)
+peliculas_genero <- read_csv("datos_salida/peliculas_genero.csv", show_col_types = FALSE)
+embudo <- read_csv("datos_salida/embudo_limpieza.csv", show_col_types = FALSE)
+
+# Géneros con al menos 500 películas (descarta News, Talk-Show y Film-Noir)
+generos_analisis <- peliculas_genero %>%
+  count(genero) %>%
+  filter(n >= 500) %>%
+  pull(genero)
+
+peliculas_genero <- peliculas_genero %>%
+  filter(genero %in% generos_analisis)
+
+# El análisis comienza en 1920: las décadas de 1900 y 1910 tienen
+# solo 1 y 57 películas, muy pocas para comparar
+peliculas <- peliculas %>% filter(decada >= 1920)
+peliculas_genero <- peliculas_genero %>% filter(decada >= 1920)
+
+# Funciones auxiliares para dar formato a los números dentro del texto
+fmt <- function(x) format(x, big.mark = ".", trim = TRUE) #Agrega el punto de los miles
+dec <- function(x, d = 2) format(round(x, d), decimal.mark = ",", nsmall = d, trim = TRUE) #Redondea a la cantidad de decimales que elijas, con coma
+```
+
+# Introducción
+
+El cine acumula más de un siglo de producción, y en ese tiempo cambiaron tanto la manera de hacer películas como la forma de verlas y valorarlas. IMDb (*Internet Movie Database*) es una de las bases de datos de cine más grandes del mundo: sus usuarios califican cada película en una escala de 1 a 10, y el sitio publica periódicamente conjuntos de datos con esa información. Este trabajo utiliza esos datos abiertos para explorar cómo se comportaron dos características de las películas a lo largo del tiempo: su **puntaje** y su **duración**.
+
+La pregunta que guía el análisis es:
+
+> **¿Cómo evolucionaron los puntajes y la duración de las películas por década y género?**
+
+Se trata de una pregunta **descriptiva**: no busca explicar por qué ocurren los cambios, sino describir qué se observa en los datos. Para abordarla, se divide en tres preguntas más concretas:
+
+1. **¿Cambió el puntaje promedio de las películas con el paso de las décadas?** Por ejemplo, si las películas de los años 50 tienen puntajes más altos, más bajos o similares a los de las películas de la década de 2010.
+2. **¿Cambió la duración de las películas con el paso de las décadas?** Por ejemplo, si las películas actuales duran más o menos que las de hace sesenta años.
+3. **¿Son iguales esos cambios para todos los géneros?** Por ejemplo, si el puntaje del terror evolucionó igual que el del drama, o si hay géneros que sistemáticamente duran más.
+
+Los resultados describen patrones en los datos de IMDb. Por eso no permiten afirmar, por ejemplo, que las películas de una época fueran "mejores" que las de otra: las limitaciones de la fuente y de los criterios de selección se discuten en las conclusiones.
+
+# Materiales y métodos
+
+## Selección de los datos
+
+Los datos provienen de los conjuntos de datos públicos de IMDb (<https://datasets.imdbws.com/>), que el sitio ofrece para uso personal y no comercial. Se descargaron el **7 de noviembre de 2026**. Como IMDb los actualiza a diario, los resultados podrían variar levemente si se descargan nuevamente.
+
+De todas las tablas disponibles se utilizaron dos, que se vinculan mediante un identificador único de cada título (`tconst`):
+
+- **`title.basics`**: contiene una fila por cada título registrado en IMDb (películas, series, cortos, episodios, etc.), con información general como el tipo de título, el nombre, el año de estreno, la duración y los géneros. Tiene alrededor de 12,9 millones de filas.
+- **`title.ratings`**: contiene el puntaje promedio que los usuarios de IMDb le dieron a cada título y la cantidad de votos recibidos, en una escala de 1 a 10. Tiene alrededor de 1,7 millones de filas, porque no todos los títulos tienen puntaje.
+
+La unidad de observación es **la película**. Las variables utilizadas se resumen en la @tbl-variables.
+
+| Variable original | Nombre en este trabajo | Descripción | Tipo |
+|:--|:--|:--|:--|
+| `tconst` | `id` | Identificador único del título | Identificador |
+| `primaryTitle` | `titulo` | Nombre con el que se conoce la película | Texto |
+| `startYear` | `anio` | Año de estreno | Cuantitativa |
+| *(construida)* | `decada` | Década de estreno (por ejemplo, 1990 para 1990-1999) | Categórica ordenada |
+| `runtimeMinutes` | `duracion` | Duración en minutos | Cuantitativa |
+| `genres` | `generos` / `genero` | Hasta tres géneros por película | Categórica |
+| `averageRating` | `puntaje` | Puntaje promedio de los usuarios (1 a 10) | Cuantitativa |
+| `numVotes` | `votos` | Cantidad de votos recibidos | Cuantitativa |
+| `titleType`, `isAdult` | *(solo para filtrar)* | Tipo de título y marca de contenido para adultos | Categórica |
+
+: Variables utilizadas {#tbl-variables}
+
+## Limpieza
+
+El objetivo de la limpieza fue quedarse con un conjunto de películas comparables entre sí y con datos confiables. Al leer los archivos, los valores faltantes, que IMDb escribe como `\N`, se convirtieron en `NA`. Luego se aplicaron los pasos que resume la @tbl-embudo, donde cada fila indica cuántas películas quedan después de aplicar ese paso, y la última columna cuántas se descartaron en él.
+
+```{r}
+#| label: tbl-embudo
+#| tbl-cap: "Películas que quedan en cada paso de la limpieza"
+embudo_tabla <- embudo %>%
+  mutate(
+    n = format(n, big.mark = ".", trim = TRUE),
+    perdidas = ifelse(is.na(perdidas), "-", format(perdidas, big.mark = ".", trim = TRUE))
+  )
+
+kable(embudo_tabla,
+      col.names = c("Paso", "Películas restantes", "Descartadas en el paso"),
+      align = "lrr")
+```
+
+Cada paso se explica a continuación:
+
+1. **Títulos de tipo película.** De los millones de títulos de IMDb, se conservaron solo los de tipo película (`movie`), dejando afuera series, episodios, cortometrajes y otros formatos. Quedaron `r fmt(embudo$n[1])` títulos.
+2. **Sin marca de contenido para adultos.** Como se trata de un trabajo académico, se excluyeron las películas que IMDb marca como contenido para adultos (`isAdult`). Se descartaron `r fmt(embudo$perdidas[2])` películas, es decir, el `r dec(100 * embudo$perdidas[2] / embudo$n[1], 1)` % del total.
+3. **Con puntaje.** Se unieron las dos tablas por el identificador del título, conservando solo las películas presentes en ambas. Este paso descarta a `r fmt(embudo$perdidas[3])` películas (el `r dec(100 * embudo$perdidas[3] / embudo$n[2], 1)` %), que no tienen ningún puntaje registrado.
+4. **Al menos 1.000 votos.** Un puntaje basado en pocos votos es poco confiable: una película con cinco votos y puntaje 9,8 no dice nada sobre su recepción. Se exigió un mínimo de 1.000 votos, que es el filtro que más películas descarta (`r fmt(embudo$perdidas[4])`). La contracara es que el análisis queda limitado a las películas más conocidas, algo que se retoma en las conclusiones.
+5. **Datos completos.** Se descartaron las películas sin año de estreno, duración o género registrados (`r fmt(embudo$perdidas[5])` películas), porque son variables necesarias para responder la pregunta.
+6. **Estrenadas hasta 2025.** Se excluyeron las películas con año de estreno 2026, porque ese año todavía no terminó y no sería comparable con los años completos (`r fmt(embudo$perdidas[6])` películas).
+7. **Duración entre 40 y 300 minutos.** Se usó como criterio de largometraje una duración mínima de 40 minutos, y se fijó un máximo de 300 para descartar duraciones imposibles: en los datos originales aparecen películas de más de 51.000 minutos, que son errores de carga o registros atípicos. Se descartaron `r fmt(embudo$perdidas[7])` películas.
+8. **Verificación del género "Adult".** Se controló que ninguna de las películas restantes tuviera "Adult" entre sus géneros. No se encontró ninguna (`r fmt(embudo$perdidas[8])` descartadas), lo que confirma que la base final no contiene contenido para adultos ni por la marca `isAdult` ni por el género.
+
+Como resultado, la base limpia tiene `r fmt(embudo$n[8])` películas.
+
+### Construcción de variables
+
+A partir del año de estreno se calculó la **década** (por ejemplo, 1994 pertenece a la década de 1990). Además, como IMDb guarda los géneros de cada película en una sola celda separada por comas (por ejemplo, "Drama,Romance"), se generó una segunda versión de la base con **una fila por película y por género**. En esa versión, una película con tres géneros aparece tres veces, una vez por cada género. Por eso, al analizar géneros, la suma de películas por género supera el total de películas.
+
+### Decisiones adicionales para el análisis
+
+Hay tres criterios que se aplican al analizar los datos, y no a la base limpia:
+
+- **Período:** el análisis comienza en la década de 1920, porque las décadas de 1900 y 1910 tienen solo 1 y 57 películas, muy pocas para comparar. Con esto se analizan `r fmt(nrow(peliculas))` películas. La década de 2020 está incompleta, ya que solo abarca hasta 2025.
+- **Géneros:** se trabajó con los géneros que tienen al menos 500 películas. Quedaron afuera *News* (29 películas), *Talk-Show* (1) y *Film-Noir* (463), este último muy concentrado en las décadas de 1940 y 1950.
+- **Combinaciones de década y género:** solo se comparan las combinaciones con al menos 30 películas, ya que con menos casos los promedios son muy inestables.
+
+# Resultados
+
+## Descripción general
+
+El análisis se basa en `r fmt(nrow(peliculas))` películas estrenadas entre 1920 y 2025. La @tbl-global resume el puntaje y la duración del conjunto completo.
+
+```{r}
+#| label: tbl-global
+#| tbl-cap: "Medidas descriptivas generales del puntaje y la duración (Q1 y Q3: primer y tercer cuartil)"
+resumen_global <- peliculas %>%
+  summarise(
+    across(c(puntaje, duracion),
+           list(minimo = min,
+                q1 = function(x) quantile(x, 0.25, names = FALSE),
+                mediana = median,
+                media = mean,
+                q3 = function(x) quantile(x, 0.75, names = FALSE),
+                maximo = max,
+                desvio = sd))
+  ) %>%
+  pivot_longer(everything(),
+               names_to = c("variable", "medida"),
+               names_sep = "_",
+               values_to = "valor") %>%
+  pivot_wider(names_from = medida, values_from = valor) %>%
+  mutate(variable = recode(variable,
+                           puntaje = "Puntaje",
+                           duracion = "Duración (min)"))
+
+kable(resumen_global, digits = 2,
+      col.names = c("Variable", "Mínimo", "Q1", "Mediana", "Media", "Q3", "Máximo", "Desvío"))
+```
+
+```{r}
+#| include: false
+# Cuartiles para citar en el texto
+p_q <- unname(quantile(peliculas$puntaje, c(0.25, 0.75)))
+d_q <- unname(quantile(peliculas$duracion, c(0.25, 0.75)))
+```
+
+El puntaje promedio es de `r dec(mean(peliculas$puntaje))` (mediana: `r dec(median(peliculas$puntaje))`) y la mitad central de las películas tiene puntajes entre `r dec(p_q[1])` y `r dec(p_q[2])`. La duración promedio es de `r dec(mean(peliculas$duracion), 1)` minutos (mediana: `r dec(median(peliculas$duracion), 0)`) y la mitad central de las películas dura entre `r dec(d_q[1], 0)` y `r dec(d_q[2], 0)` minutos.
+
+## Evolución por década
+
+La @tbl-decada muestra el puntaje y la duración promedio y mediana de cada década.
+
+```{r}
+#| label: tbl-decada
+#| tbl-cap: "Puntaje y duración de las películas por década de estreno"
+resumen_decada <- peliculas %>%
+  group_by(decada) %>%
+  summarise(
+    n = n(),
+    puntaje_media = mean(puntaje),
+    puntaje_mediana = median(puntaje),
+    duracion_media = mean(duracion),
+    duracion_mediana = median(duracion)
+  )
+
+kable(resumen_decada, digits = 2,
+      col.names = c("Década", "Películas", "Puntaje (media)", "Puntaje (mediana)",
+                    "Duración (media)", "Duración (mediana)"))
+```
+
+```{r}
+#| include: false
+# Valores de la primera y la última década, para citar en el texto
+dec_ini <- resumen_decada %>% filter(decada == min(decada))
+dec_fin <- resumen_decada %>% filter(decada == max(decada))
+```
+
+Lo primero que se observa es que la cantidad de películas crece mucho con el tiempo: de `r fmt(dec_ini$n)` en la década de `r dec_ini$decada` a `r fmt(max(resumen_decada$n))` en la década de `r resumen_decada$decada[which.max(resumen_decada$n)]`. Esto debe tenerse presente al comparar décadas, ya que las más antiguas tienen muchos menos casos.
+
+**Puntaje.** El puntaje promedio desciende de `r dec(dec_ini$puntaje_media)` en la década de `r dec_ini$decada` a `r dec(dec_fin$puntaje_media)` en la de `r dec_fin$decada`, una caída de aproximadamente `r dec(dec_ini$puntaje_media - dec_fin$puntaje_media)` puntos. El descenso es gradual y casi continuo, con apenas dos leves excepciones (las décadas de 1940 y de 1990), en las que el promedio es un poco mayor que en la década anterior. Entre las décadas de 2010 y 2020 el valor casi no cambia (`r dec(resumen_decada$puntaje_media[resumen_decada$decada == 2010])` y `r dec(dec_fin$puntaje_media)`).
+
+En la @fig-puntaje-decada, cada caja contiene al 50 % central de las películas de la década, la línea interna indica la mediana y los puntos aislados son películas con puntajes inusualmente altos o bajos.
+
+```{r}
+#| label: fig-puntaje-decada
+#| fig-cap: "Distribución del puntaje de IMDb según década de estreno. La década de 2020 incluye solo hasta 2025."
+ggplot(peliculas) +
+  aes(x = factor(decada), y = puntaje) +
+  geom_boxplot(fill = "lightblue") +
+  labs(x = "Década de estreno", y = "Puntaje promedio en IMDb",
+       caption = "Fuente: IMDb (datasets.imdbws.com)")
+```
+
+El gráfico muestra además un cambio en la forma de la distribución. En las primeras décadas casi no hay películas con puntajes bajos, mientras que en las décadas recientes aparece una cola larga de películas con puntajes muy bajos. Esa diferencia puede deberse en parte a que hay muchas más películas en las décadas recientes (y, por lo tanto, más casos extremos), y a que el filtro de 1.000 votos deja en las décadas antiguas sobre todo a los clásicos más conocidos.
+
+**Duración.** La duración mediana pasa de `r dec(dec_ini$duracion_mediana, 0)` minutos en la década de `r dec_ini$decada` a `r dec(dec_fin$duracion_mediana, 0)` minutos en la de `r dec_fin$decada`. La década con la mediana más baja es la de `r resumen_decada$decada[which.min(resumen_decada$duracion_mediana)]` (`r dec(min(resumen_decada$duracion_mediana), 0)` minutos). Se observa un aumento entre las décadas de 1950 y 1960 (de `r dec(resumen_decada$duracion_mediana[resumen_decada$decada == 1950], 0)` a `r dec(resumen_decada$duracion_mediana[resumen_decada$decada == 1960], 0)` minutos), seguido de un período bastante estable hasta la década de 2010, en el que la mediana ronda los 100 minutos.
+
+```{r}
+#| label: fig-duracion-decada
+#| fig-cap: "Distribución de la duración (en minutos) según década de estreno."
+ggplot(peliculas) +
+  aes(x = factor(decada), y = duracion) +
+  geom_boxplot(fill = "lightgreen") +
+  labs(x = "Década de estreno", y = "Duración (minutos)",
+       caption = "Fuente: IMDb (datasets.imdbws.com)")
+```
+
+En todas las décadas aparecen películas mucho más largas o más cortas que lo habitual (los puntos aislados), pero la caja central, que concentra a la mayoría de las películas, se mantiene en un rango bastante acotado.
+
+## Evolución por género
+
+Esta sección compara los géneros entre sí y analiza cómo evolucionó cada uno. Los nombres de los géneros se mantienen tal como los publica IMDb, en inglés. Cada película puede tener hasta tres géneros y se cuenta en cada uno de ellos: por ejemplo, una película clasificada como *Drama* y *Romance* forma parte tanto del grupo de drama como del de romance. Por este motivo, los grupos no son excluyentes y la suma de películas por género (`r fmt(nrow(peliculas_genero))`) supera la cantidad de películas analizadas (`r fmt(nrow(peliculas))`).
+
+```{r}
+#| label: tbl-genero
+#| tbl-cap: "Puntaje y duración promedio por género (todas las décadas juntas)"
+resumen_genero <- peliculas_genero %>%
+  group_by(genero) %>%
+  summarise(
+    n = n(),
+    puntaje_media = mean(puntaje),
+    duracion_media = mean(duracion)
+  ) %>%
+  arrange(desc(puntaje_media))
+
+kable(resumen_genero, digits = 2,
+      col.names = c("Género", "Películas", "Puntaje (media)", "Duración (media)"))
+```
+
+El género con mayor puntaje promedio es *`r resumen_genero$genero[1]`* (`r dec(resumen_genero$puntaje_media[1])`) y el de menor puntaje es *`r resumen_genero$genero[nrow(resumen_genero)]`* (`r dec(resumen_genero$puntaje_media[nrow(resumen_genero)])`). En cuanto a la duración, el género más largo es *`r resumen_genero$genero[which.max(resumen_genero$duracion_media)]`* (`r dec(max(resumen_genero$duracion_media), 1)` minutos en promedio) y el más corto es *`r resumen_genero$genero[which.min(resumen_genero$duracion_media)]`* (`r dec(min(resumen_genero$duracion_media), 1)` minutos). Como esta tabla mezcla todas las décadas, para ver la evolución en el tiempo se usan los gráficos siguientes.
+
+```{r}
+#| label: promedios-genero-decada
+#| include: false
+# Promedios por género y década; se descartan las combinaciones con menos de 30 películas
+resumen_gd <- peliculas_genero %>%
+  group_by(genero, decada) %>%
+  summarise(
+    n = n(),
+    puntaje_media = mean(puntaje),
+    duracion_media = mean(duracion),
+    .groups = "drop"
+  ) %>%
+  filter(n >= 30)
+```
+
+### Mapas de calor: todos los géneros a la vez
+
+Cada celda de los siguientes gráficos corresponde a un género y una década, y su color indica el valor promedio: cuanto más oscuro el azul, mayor el valor. Los géneros están ordenados de mayor a menor promedio. Las celdas vacías corresponden a combinaciones con menos de 30 películas, que no se muestran.
+
+```{r}
+#| label: fig-heatmap-puntaje
+#| fig-cap: "Puntaje promedio por género y década. Las celdas vacías tienen menos de 30 películas."
+#| fig-width: 9
+#| fig-height: 7
+ggplot(resumen_gd) +
+  aes(x = factor(decada), y = reorder(genero, puntaje_media), fill = puntaje_media) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = format(round(puntaje_media, 1), decimal.mark = ",")), size = 3) +
+  scale_fill_gradient(low = "white", high = "#6baed6") +
+  labs(x = "Década de estreno", y = "Género", fill = "Puntaje\npromedio",
+       caption = "Fuente: IMDb (datasets.imdbws.com)")
+```
+
+```{r}
+#| label: fig-heatmap-duracion
+#| fig-cap: "Duración promedio (en minutos) por género y década. Las celdas vacías tienen menos de 30 películas."
+#| fig-width: 9
+#| fig-height: 7
+ggplot(resumen_gd) +
+  aes(x = factor(decada), y = reorder(genero, duracion_media), fill = duracion_media) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = round(duracion_media)), size = 3) +
+  scale_fill_gradient(low = "white", high = "#6baed6") +
+  labs(x = "Década de estreno", y = "Género", fill = "Duración\npromedio\n(min)",
+       caption = "Fuente: IMDb (datasets.imdbws.com)")
+```
+
+### Gráficos interactivos: un género a la vez
+
+Para ver la evolución de géneros puntuales, los siguientes gráficos son interactivos: se pueden elegir uno o varios géneros en el selector. Una buena forma de usarlos es comparar géneros de comportamiento distinto, por ejemplo *`r resumen_genero$genero[1]`* y *`r resumen_genero$genero[nrow(resumen_genero)]`*, que son los de mayor y menor puntaje promedio. Al pasar el cursor sobre un punto se ve el valor exacto y la cantidad de películas en que se basa. Solo se muestran las décadas con al menos 30 películas del género, porque con menos casos los promedios son muy inestables.
+
+```{r}
+#| label: fig-genero-interactivo
+#| fig-cap: "Puntaje y duración promedio por década, según género (interactivo)."
+
+# Objeto compartido: el selector y los gráficos quedan conectados
+datos_gd <- SharedData$new(resumen_gd)
+
+selector <- filter_select(
+  id = "selector_genero",
+  label = "Elegí uno o más géneros",
+  sharedData = datos_gd,
+  group = ~genero
+)
+
+grafico_puntaje <- plot_ly(
+  datos_gd, x = ~decada, y = ~puntaje_media, color = ~genero,
+  type = "scatter", mode = "lines+markers",
+  hoverinfo = "text",
+  text = ~paste0(genero, ", ", decada, "s: ", round(puntaje_media, 2),
+                 " (", n, " películas)")
+) %>%
+  layout(title = "Puntaje promedio",
+         xaxis = list(title = "Década de estreno"),
+         yaxis = list(title = "Puntaje promedio en IMDb"))
+
+grafico_duracion <- plot_ly(
+  datos_gd, x = ~decada, y = ~duracion_media, color = ~genero,
+  type = "scatter", mode = "lines+markers",
+  hoverinfo = "text",
+  text = ~paste0(genero, ", ", decada, "s: ", round(duracion_media, 1),
+                 " min (", n, " películas)")
+) %>%
+  layout(title = "Duración promedio",
+         xaxis = list(title = "Década de estreno"),
+         yaxis = list(title = "Duración promedio (minutos)"))
+
+# Selector arriba (ancho completo) y los dos gráficos uno arriba del otro
+bscols(widths = c(12, 12, 12), selector, grafico_puntaje, grafico_duracion)
+```
+
+# Conclusiones
+
+```{r}
+#| include: false
+# --- Cálculos para citar en el texto de las conclusiones ---
+
+# Décadas "estables" de duración (de 1960 a 2010)
+dec_estables <- resumen_decada %>% filter(decada >= 1960, decada <= 2010)
+
+# Se conservan solo los géneros que tienen datos suficientes (al menos 30 películas)
+# en alguna década de 1970 o anterior y también en la década de 2020.
+# Así, cada comparación abarca al menos 50 años.
+cambio_genero <- resumen_gd %>%
+  arrange(genero, decada) %>%
+  group_by(genero) %>%
+  summarise(
+    dec_ini = first(decada),
+    dec_fin = last(decada),
+    puntaje_ini = first(puntaje_media),
+    puntaje_fin = last(puntaje_media),
+    duracion_ini = first(duracion_media),
+    duracion_fin = last(duracion_media),
+    .groups = "drop"
+  ) %>%
+  filter(dec_ini <= 1970, dec_fin == 2020) %>%
+  mutate(cambio_puntaje = puntaje_fin - puntaje_ini,
+         cambio_duracion = duracion_fin - duracion_ini)
+
+# Si no queda ningún género, el Render se detiene con este mensaje
+stopifnot("No quedan géneros para comparar" = nrow(cambio_genero) > 0)
+
+# Posición de los géneros con mayor y menor cambio (en valor absoluto)
+p_max <- which.max(abs(cambio_genero$cambio_puntaje))
+p_min <- which.min(abs(cambio_genero$cambio_puntaje))
+d_max <- which.max(abs(cambio_genero$cambio_duracion))
+d_min <- which.min(abs(cambio_genero$cambio_duracion))
+```
+
+Este trabajo describió cómo cambiaron el puntaje y la duración de `r fmt(nrow(peliculas))` películas de IMDb entre las décadas de 1920 y 2020, y cómo se comportaron esos cambios según el género. Los principales hallazgos, organizados según las tres preguntas de la introducción, son los siguientes.
+
+## Hallazgos
+
+**1. Puntaje por década.** El puntaje promedio disminuyó de forma gradual: pasó de `r dec(dec_ini$puntaje_media)` en la década de `r dec_ini$decada` a `r dec(dec_fin$puntaje_media)` en la de `r dec_fin$decada`, una diferencia de `r dec(dec_ini$puntaje_media - dec_fin$puntaje_media)` puntos. Además, en las décadas recientes aparece una cola de películas con puntajes muy bajos que casi no existe en las primeras décadas.
+
+**2. Duración por década.** La duración mediana aumentó de `r dec(dec_ini$duracion_mediana, 0)` minutos en la década de `r dec_ini$decada` a `r dec(dec_fin$duracion_mediana, 0)` minutos en la de `r dec_fin$decada`. El cambio más marcado ocurrió entre las décadas de 1950 y 1960; desde entonces y hasta la década de 2010, la mediana se mantuvo estable, entre `r dec(min(dec_estables$duracion_mediana), 0)` y `r dec(max(dec_estables$duracion_mediana), 0)` minutos.
+
+**3. Diferencias entre géneros.** Entre los `r nrow(cambio_genero)` géneros que tienen datos suficientes, el puntaje promedio fue menor en la década de 2020 comparado con la primera década disponible en `r sum(cambio_genero$cambio_puntaje < 0)` de ellos. El mayor cambio se observó en *`r cambio_genero$genero[p_max]`* (de `r dec(cambio_genero$puntaje_ini[p_max])` en la década de `r cambio_genero$dec_ini[p_max]` a `r dec(cambio_genero$puntaje_fin[p_max])` en la de 2020) y el menor en *`r cambio_genero$genero[p_min]`* (de `r dec(cambio_genero$puntaje_ini[p_min])` en la década de `r cambio_genero$dec_ini[p_min]` a `r dec(cambio_genero$puntaje_fin[p_min])` en la de 2020).
+
+En cuanto a la duración, el promedio fue mayor en la década de 2020 que en la primera década disponible en `r sum(cambio_genero$cambio_duracion > 0)` de esos `r nrow(cambio_genero)` géneros. El mayor cambio ocurrió en *`r cambio_genero$genero[d_max]`* (de `r dec(cambio_genero$duracion_ini[d_max], 1)` a `r dec(cambio_genero$duracion_fin[d_max], 1)` minutos) y el menor en *`r cambio_genero$genero[d_min]`* (de `r dec(cambio_genero$duracion_ini[d_min], 1)` a `r dec(cambio_genero$duracion_fin[d_min], 1)` minutos). Es decir, los cambios en puntaje y duración se observan con magnitudes distintas según el género. Los mapas de calor y los gráficos interactivos permiten ver el detalle de cada uno.
+
+## Limitaciones
+
+Los resultados deben interpretarse teniendo en cuenta las siguientes limitaciones:
+
+- **Los puntajes son de usuarios de IMDb.** No representan la opinión de la crítica ni de todos los espectadores, y quienes votan en el sitio no son una muestra representativa de la población.
+- **Solo se incluyeron películas con al menos 1.000 votos.** En las décadas antiguas esto deja sobre todo a los clásicos más conocidos, lo que puede inflar sus puntajes. En las décadas recientes, en cambio, llegan a ese umbral muchas más películas, incluidas algunas menos valoradas. Esta diferencia podría explicar parte del descenso del puntaje promedio.
+- **La cantidad de películas es muy desigual entre décadas** (por ejemplo, `r fmt(dec_ini$n)` en la década de `r dec_ini$decada` frente a `r fmt(max(resumen_decada$n))` en la década de `r resumen_decada$decada[which.max(resumen_decada$n)]`), por lo que las décadas antiguas están representadas por pocos casos.
+- **La década de 2020 está incompleta**, ya que solo incluye películas estrenadas hasta 2025.
+- **Los géneros no son grupos independientes.** Una película con varios géneros se cuenta en cada uno, y se excluyeron los géneros con menos de 500 películas y las combinaciones de década y género con menos de 30.
+- **Es un análisis descriptivo.** Los promedios resumen cada grupo pero ocultan su dispersión, y los datos permiten observar patrones, no explicar sus causas.
+
+## Cierre
+
+En conjunto, los datos muestran que las películas de IMDb fueron perdiendo puntaje y ganando duración con el paso de las décadas, aunque con matices según el género. Estos resultados abren preguntas que excederían este trabajo, como cuánto del descenso del puntaje se debe a un cambio real en la valoración y cuánto a la composición de las películas que llegan a ser votadas.

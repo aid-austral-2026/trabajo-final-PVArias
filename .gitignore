@@ -1,0 +1,7 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+
+# Datos originales de IMDb (muy pesados; se descargan de https://datasets.imdbws.com/)
+datos_crudos/
